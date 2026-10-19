@@ -39,11 +39,21 @@ def cadastrar():
                 if posicao_string in posicoes:
                     break
                 print("Posição inválida. Digite uma das opções acima.")
+
+            while True:
+                try:
+                    nota_inicial = float(input('Nota inicial de habilidade (0 a 10): ').strip().replace(',', '.'))
+                    futebol.nota_valida(nota_inicial)
+                    break
+                except ValueError:
+                    print('Digite uma nota válida de 0 a 10.')
             
             try:
                 with SessionLocal.begin() as session:
                     session.add(User(
                         username=nome,
+                        initial_rating=nota_inicial,
+                        rating=nota_inicial,
                         current_position_id=6 if posicao_string == '0' else int(posicao_string),
                     ))
             except SQLAlchemyError:
@@ -85,7 +95,9 @@ def listar():
         for atleta in atletas:
             print(f"ID: {atleta['id']} | Nome: {atleta['nome']} | Posição: {atleta['posicao']}")
             nota = 'Sem avaliações' if atleta['nota'] is None else f"{atleta['nota']:.1f}"
+            inicial = 'Não informada' if atleta['nota_inicial'] is None else f"{atleta['nota_inicial']:.1f}"
             print(f"  Função: {atleta['funcao']} | Posição anterior: {atleta['anterior']} | Nota: {nota} | Cadastro: {atleta['criado_em']}")
+            print(f'  Habilidade inicial: {inicial}')
 
 
 def menu():
@@ -128,13 +140,39 @@ def menu():
 
 def deletar():
     listar()
-    ident = ler_inteiro('ID do atleta para excluir (0 cancela): ')
-    if ident == 0:
+    while True:
+        entrada = input('IDs dos atletas para excluir, separados por vírgula (0 cancela): ').strip()
+        if entrada == '0':
+            return
+        try:
+            ids = list(dict.fromkeys(int(item.strip()) for item in entrada.split(',')))
+            if any(ident <= 0 for ident in ids):
+                raise ValueError
+            break
+        except ValueError:
+            print('Digite IDs positivos separados por vírgula, por exemplo: 3, 5, 8. Ou somente 0 para cancelar.')
+    atletas = {a['Id']: a['Nome'] for a in consultar_atletas()}
+    selecionados = []
+    print('Atletas selecionados:')
+    for ident in ids:
+        if ident not in atletas:
+            print(f'ID {ident}: não encontrado; será ignorado.')
+            continue
+        selecionados.append(ident)
+        print(f'ID {ident}: {atletas[ident]}')
+    if not selecionados:
         return
-    if input(f'Confirmar exclusão do atleta ID {ident}? S ou N: ').strip().upper() != 'S':
+    if input('Confirmar exclusão dos atletas selecionados? S ou N: ').strip().upper() != 'S':
         return
-    futebol.excluir_atleta(ident)
-    print('Atleta excluído.')
+    for ident in selecionados:
+        try:
+            futebol.excluir_atleta(ident)
+        except ValueError as erro:
+            print(f'ID {ident} não excluído: {erro}')
+        except SQLAlchemyError:
+            print(f'ID {ident} não excluído: falha no banco. Os demais resultados são informados individualmente.')
+        else:
+            print(f'Atleta excluído: ID {ident} | {atletas[ident]}')
 
 
 def ler_inteiro(pergunta):
@@ -184,8 +222,14 @@ def criar_times():
     selecao = input('IDs dos participantes separados por vírgula (ENTER para todos): ').strip()
     ids = [int(item.strip()) for item in selecao.split(',')] if selecao else [a['Id'] for a in consultar_atletas()]
     nomes = [input('Nome do time 1: '), input('Nome do time 2: ')]
-    for ident, nome, atletas in futebol.sortear_times(ids, nomes):
+    times = futebol.sortear_times(ids, nomes)
+    for ident, nome, atletas, resumo in times:
         print(f'Time salvo: ID {ident} | {nome} | ' + ', '.join(atletas))
+        print(f"  Rating total: {resumo['total']:.1f} | Média: {resumo['total'] / resumo['quantidade']:.1f}")
+        if resumo['sem_rating']:
+            print('  Sem rating: usado 5.0 apenas neste sorteio para ' + ', '.join(resumo['sem_rating']))
+    diferenca = abs(times[0][3]['total'] - times[1][3]['total'])
+    print(f'Diferença entre os totais: {diferenca:.1f} (menor possível com estes participantes).')
 
 
 def listar_times(partida_id=None):
@@ -246,7 +290,7 @@ def avaliar():
         except ValueError as erro:
             print(f'Avaliação não concluída: {erro}')
             continue
-        print('Avaliação salva; nota geral recalculada pela média das partidas.')
+        print('Avaliação salva; nota geral recalculada com a habilidade inicial e as partidas.')
         while True:
             resposta = input('Deseja avaliar outro jogador desta partida? S ou N: ').strip().upper()
             if resposta in ('S', 'N'):

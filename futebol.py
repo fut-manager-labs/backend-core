@@ -69,7 +69,56 @@ def detalhes_atletas():
                      posicao=a.current_position.position_title if a.current_position else 'Sem posição selecionada',
                      anterior=a.last_position.position_title if a.last_position else 'Nenhuma',
                      funcao=a.role.role_name if a.role else 'Sem função',
-                     nota=a.rating, criado_em=a.created_at) for a in atletas]
+                     nota=a.rating, nota_inicial=a.initial_rating, criado_em=a.created_at) for a in atletas]
+
+
+def rating_sorteio(atleta):
+    nota = 5.0 if atleta.rating is None else float(atleta.rating)
+    nota_valida(nota)
+    return int(round(round(nota, 1) * 10))
+
+
+def equilibrar_times(atletas):
+    """Minimiza a diferença de somas em décimos, com tamanho e goleiros válidos."""
+    atletas = list(atletas)
+    random.shuffle(atletas)
+    goleiros = [bool(a.current_position and
+                     a.current_position.position_title.strip().casefold() == 'goleiro')
+                for a in atletas]
+    total_goleiros = sum(goleiros)
+    if total_goleiros < 2:
+        raise ValueError('Selecione pelo menos dois goleiros para criar os times.')
+    notas = [rating_sorteio(a) for a in atletas]
+    tamanho = len(atletas) // 2
+    # Uma máscara de participantes por estado (quantidade, soma, goleiros).
+    estados = {(0, 0, 0): 0}
+    for indice, (nota, goleiro) in enumerate(zip(notas, goleiros)):
+        novos = {}
+        for (quantidade, soma, qtd_goleiros), mascara in estados.items():
+            if quantidade >= tamanho or qtd_goleiros + goleiro >= total_goleiros:
+                continue
+            chave = (quantidade + 1, soma + nota, qtd_goleiros + goleiro)
+            if chave not in estados and chave not in novos:
+                novos[chave] = mascara | (1 << indice)
+        estados.update(novos)
+    total = sum(notas)
+    melhores = []
+    menor_diferenca = None
+    for (quantidade, soma, qtd_goleiros), mascara in estados.items():
+        if quantidade != tamanho or not 0 < qtd_goleiros < total_goleiros:
+            continue
+        diferenca = abs(total - 2 * soma)
+        if menor_diferenca is None or diferenca < menor_diferenca:
+            menor_diferenca = diferenca
+            melhores = [mascara]
+        elif diferenca == menor_diferenca:
+            melhores.append(mascara)
+    escolhidos = random.choice(melhores)
+    grupos = [[], []]
+    for indice, atleta in enumerate(atletas):
+        grupos[0 if escolhidos & (1 << indice) else 1].append(atleta)
+    random.shuffle(grupos)
+    return grupos
 
 
 def sortear_times(ids, nomes):
@@ -80,23 +129,17 @@ def sortear_times(ids, nomes):
     nomes = [nome_valido(n) for n in nomes]
     with SessionLocal.begin() as session:
         atletas = [exigir(session, User, ident, 'Atleta') for ident in ids]
-        goleiros = [a for a in atletas if a.current_position and
-                    a.current_position.position_title.strip().casefold() == 'goleiro']
-        if len(goleiros) < 2:
-            raise ValueError('Selecione pelo menos dois goleiros para criar os times.')
-        random.shuffle(goleiros)
-        grupos = [[goleiros[0]], [goleiros[1]]]
-        restantes = [a for a in atletas if a.id not in {goleiros[0].id, goleiros[1].id}]
-        random.shuffle(restantes)
-        for atleta in restantes:
-            grupos[0 if len(grupos[0]) <= len(grupos[1]) else 1].append(atleta)
+        grupos = equilibrar_times(atletas)
         resultado = []
         for nome, grupo in zip(nomes, grupos):
             time = Team(team_name=nome)
             session.add(time)
             session.flush()
             session.add_all([TeamPlayer(team_id=time.id, user_id=a.id) for a in grupo])
-            resultado.append((time.id, nome, [a.username for a in grupo]))
+            resumo = dict(total=sum(rating_sorteio(a) for a in grupo) / 10,
+                          quantidade=len(grupo),
+                          sem_rating=[a.username for a in grupo if a.rating is None])
+            resultado.append((time.id, nome, [a.username for a in grupo], resumo))
         return resultado
 
 
@@ -165,7 +208,14 @@ def avaliar_atleta(partida_id, atleta_id, nota):
         medias_por_partida = (select(func.avg(PlayerMatchRating.rating).label('nota'))
                               .where(PlayerMatchRating.user_id == atleta_id)
                               .group_by(PlayerMatchRating.match_id).subquery())
-        atleta.rating = session.scalar(select(func.avg(medias_por_partida.c.nota)))
+        soma, quantidade = session.execute(select(
+            func.coalesce(func.sum(medias_por_partida.c.nota), 0),
+            func.count(medias_por_partida.c.nota))).one()
+        soma = float(soma)
+        if atleta.initial_rating is not None:
+            soma += float(atleta.initial_rating)
+            quantidade += 1
+        atleta.rating = soma / quantidade if quantidade else None
 
 
 def consultar_partidas():

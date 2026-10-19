@@ -25,6 +25,7 @@ class User(Base):
     role_id = mapped_column(Integer, ForeignKey("roles.id", name="fk_users_roles"), nullable=True)
     created_at = mapped_column(TIMESTAMP, nullable=True, server_default=text("CURRENT_TIMESTAMP"))
     rating = mapped_column(DOUBLE, nullable=True)
+    initial_rating = mapped_column(DOUBLE, nullable=True)
     current_position_id = mapped_column(Integer, ForeignKey("positions.id", name="fk_users_current_position"), nullable=True)
     last_position_id = mapped_column(Integer, ForeignKey("positions.id", name="fk_users_last_position"), nullable=True)
     role = relationship("Role")

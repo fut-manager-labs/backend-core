@@ -37,11 +37,13 @@ class MenuTests(unittest.TestCase):
         return output.getvalue()
 
     def test_cadastro_persiste_e_listagem_em_nova_sessao(self):
-        self.cadastrar(['S', 'Ana', 'invalida', '6', 'N'])
+        self.cadastrar(['S', 'Ana', 'invalida', '6', 'abc', '-1', '11', 'nan', 'inf', '8,5', 'N'])
         with self.sessions() as session:
             atleta = session.scalar(select(User))
             self.assertEqual(atleta.username, 'ANA')
             self.assertEqual(atleta.current_position_id, 6)
+            self.assertEqual(atleta.initial_rating, 8.5)
+            self.assertEqual(atleta.rating, 8.5)
         output = io.StringIO()
         with redirect_stdout(output):
             menu.listar()
@@ -50,7 +52,7 @@ class MenuTests(unittest.TestCase):
     def test_sem_posicao_e_usuario_preexistente(self):
         with self.sessions.begin() as session:
             session.add(User(username='Gabriel'))
-        self.cadastrar(['S', 'Bia', '0', 'N'])
+        self.cadastrar(['S', 'Bia', '0', '0', 'N'])
         atletas = menu.consultar_atletas()
         self.assertEqual([a['Nome'] for a in atletas], ['Gabriel', 'BIA'])
         self.assertEqual(atletas[0]['Posicao'], 'Sem posição selecionada')
@@ -74,13 +76,41 @@ class MenuTests(unittest.TestCase):
             return original_flush(session, *args, **kwargs)
 
         with patch.object(Session, 'flush', falhar_gravacao):
-            output = self.cadastrar(['S', 'Teste', '1'])
+            output = self.cadastrar(['S', 'Teste', '1', '7'])
         self.assertIn('Nenhum cadastro foi confirmado', output)
         self.assertNotIn('senha-secreta', output)
         self.assertEqual(menu.consultar_atletas(), [])
 
 
 class MenuFluxoTests(unittest.TestCase):
+    def test_exclusao_multipla_deduplica_e_continua_apos_bloqueio(self):
+        atletas = [dict(Id=1, Nome='Ana'), dict(Id=2, Nome='Bia'), dict(Id=3, Nome='Caio')]
+        output = io.StringIO()
+        with patch.object(menu, 'listar'), \
+             patch.object(menu, 'consultar_atletas', return_value=atletas), \
+             patch.object(futebol, 'excluir_atleta', side_effect=[None, ValueError('Atleta vinculado'), None]) as excluir, \
+             patch('builtins.input', side_effect=['1, 2, 1, 99, 3', 'S']), redirect_stdout(output):
+            menu.deletar()
+        self.assertEqual(excluir.call_args_list, [call(1), call(2), call(3)])
+        self.assertIn('ID 99: não encontrado', output.getvalue())
+        self.assertIn('ID 2 não excluído: Atleta vinculado', output.getvalue())
+        self.assertIn('Atleta excluído: ID 3', output.getvalue())
+
+    def test_exclusao_rejeita_entrada_invalida_e_permite_cancelar(self):
+        with patch.object(menu, 'listar'), patch.object(futebol, 'excluir_atleta') as excluir, \
+             patch('builtins.input', side_effect=['1, abc', '0, 2', '-1', '', '0']), \
+             redirect_stdout(io.StringIO()):
+            menu.deletar()
+        excluir.assert_not_called()
+
+    def test_exclusao_nao_confirmada_preserva_atletas(self):
+        with patch.object(menu, 'listar'), \
+             patch.object(menu, 'consultar_atletas', return_value=[dict(Id=1, Nome='Ana')]), \
+             patch.object(futebol, 'excluir_atleta') as excluir, \
+             patch('builtins.input', side_effect=['1', 'N']), redirect_stdout(io.StringIO()):
+            menu.deletar()
+        excluir.assert_not_called()
+
     def test_registro_aceita_somente_data(self):
         with patch.object(menu, 'listar_times'), \
              patch.object(futebol, 'registrar_partida', return_value=3) as salvar, \
