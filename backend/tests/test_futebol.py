@@ -1,4 +1,6 @@
 import unittest
+from itertools import combinations
+from types import SimpleNamespace
 from datetime import datetime
 from unittest.mock import patch
 
@@ -57,6 +59,18 @@ class FutebolTests(unittest.TestCase):
                 tamanhos.append(len(membros))
                 self.assertTrue(any(a.current_position_id == 1 for a in membros))
             self.assertEqual(sorted(tamanhos), [3, 4])
+
+    def test_sorteio_persistido_usa_rating_atual(self):
+        with self.sessions.begin() as session:
+            for ident, nota in enumerate([10, 1, 9, 2, 8, 3, 7], 1):
+                session.get(User, ident).rating = nota
+        times = self.times()
+        with self.sessions() as session:
+            for ident, nome, nomes, resumo in times:
+                membros = session.scalars(select(User).join(TeamPlayer)
+                          .where(TeamPlayer.team_id == ident)).all()
+                self.assertEqual(resumo['total'], sum(float(a.rating) for a in membros))
+        self.assertEqual(abs(times[0][3]['total'] - times[1][3]['total']), 0)
 
     def test_sorteio_invalido_nao_grava_parcialmente(self):
         for ids in ([1, 4], [1, 2, 99], [1, 2, 2]):
@@ -147,6 +161,34 @@ class FutebolTests(unittest.TestCase):
             self.assertEqual(session.get(User, 1).rating, 8)
             self.assertEqual(session.scalar(select(func.count()).select_from(PlayerMatchRating)), 2)
 
+    def test_media_inclui_inicial_uma_vez_e_preserva_correcao(self):
+        partida, times = self.partida()
+        with self.sessions.begin() as session:
+            atleta = session.get(User, 1)
+            atleta.initial_rating = 8
+            atleta.rating = 8
+        futebol.avaliar_atleta(partida, 1, 6)
+        with self.sessions() as session:
+            self.assertEqual(session.get(User, 1).rating, 7)
+        futebol.avaliar_atleta(partida, 1, 10)
+        segunda = futebol.registrar_partida(times[0][0], times[1][0], 0, 0, datetime.now())
+        futebol.avaliar_atleta(segunda, 1, 6)
+        with self.sessions() as session:
+            atleta = session.get(User, 1)
+            self.assertEqual(atleta.rating, 8)
+            self.assertEqual(atleta.initial_rating, 8)
+            self.assertEqual(session.scalar(select(func.count()).select_from(PlayerMatchRating)), 2)
+
+    def test_nota_inicial_zero_conta_na_media(self):
+        partida, _ = self.partida()
+        with self.sessions.begin() as session:
+            atleta = session.get(User, 1)
+            atleta.initial_rating = 0
+            atleta.rating = 0
+        futebol.avaliar_atleta(partida, 1, 10)
+        with self.sessions() as session:
+            self.assertEqual(session.get(User, 1).rating, 5)
+
     def test_avaliacao_valida_participante_e_escala(self):
         partida, _ = self.partida()
         for nota in (-1, 11, float('nan'), float('inf')):
@@ -166,6 +208,48 @@ class FutebolTests(unittest.TestCase):
             session.add(TeamPlayer(team_id=times[1][0], user_id=1))
         with self.assertRaises(ValueError):
             futebol.registrar_partida(times[0][0], times[1][0], 0, 0, datetime.now())
+
+
+class EquilibrioTests(unittest.TestCase):
+    def atletas(self, notas, goleiros=2):
+        return [SimpleNamespace(id=i, username=f'Atleta {i}', rating=nota,
+                                current_position=SimpleNamespace(
+                                    position_title='Goleiro' if i < goleiros else 'Linha'))
+                for i, nota in enumerate(notas)]
+
+    def test_otimo_confere_com_todas_as_divisoes_validas(self):
+        casos = [([10, 1, 9, 2, 8, 3], 2),
+                 ([10, 1, 9, 2, 8, 3, 7], 3),
+                 ([8.5, 4.2, 6.1, 9.8, 2.3, 0], 4),
+                 ([8, 2], 2), ([0, 0, 0, 0], 4),
+                 ([5] * 9, 2)]
+        for notas, goleiros in casos:
+            with self.subTest(notas=notas, goleiros=goleiros):
+                atletas = self.atletas(notas, goleiros)
+                valores = [futebol.rating_sorteio(a) for a in atletas]
+                total = sum(valores)
+                diferencas = [abs(total - 2 * sum(valores[i] for i in grupo))
+                              for grupo in combinations(range(len(atletas)), len(atletas) // 2)
+                              if 0 < sum(i < goleiros for i in grupo) < goleiros]
+                for _ in range(3):
+                    grupos = futebol.equilibrar_times(atletas)
+                    somas = [sum(futebol.rating_sorteio(a) for a in grupo) for grupo in grupos]
+                    self.assertEqual(abs(somas[0] - somas[1]), min(diferencas))
+                    self.assertLessEqual(abs(len(grupos[0]) - len(grupos[1])), 1)
+                    self.assertEqual(sorted(a.id for g in grupos for a in g), list(range(len(atletas))))
+                    self.assertTrue(all(any(a.id < goleiros for a in g) for g in grupos))
+
+    def test_sem_rating_usa_neutro_sem_alterar_cadastro(self):
+        atletas = self.atletas([None, 0, 10, 5])
+        self.assertEqual(futebol.rating_sorteio(atletas[0]), 50)
+        futebol.equilibrar_times(atletas)
+        self.assertIsNone(atletas[0].rating)
+        self.assertEqual(futebol.rating_sorteio(atletas[1]), 0)
+
+    def test_rating_invalido_e_rejeitado(self):
+        for nota in (-1, 11, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                futebol.equilibrar_times(self.atletas([nota, 5, 5, 5]))
 
 
 if __name__ == '__main__':
