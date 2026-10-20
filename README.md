@@ -1,77 +1,255 @@
-# backend-core
-Core da aplicação de gerenciamento de jogos de futebol. O SQLAlchemy mapeia as oito tabelas existentes em `fut_manager`. O menu cadastra e lista atletas no banco e consulta as posições cadastradas. A opção `0` (sem posição selecionada) salva o atleta como Linha (`current_position_id=6`).
+# Fut Manager
 
-Para abrir o menu, execute `.\.venv\Scripts\python.exe menu.py` dentro de `backend-core`.
+Sistema completo para organização e gestão de jogos de futebol semanais, abrangendo controle de atletas, sorteio equilibrado de times, registro de partidas, histórico de confrontos e avaliações de desempenho individual.
 
-## Operações do menu
+---
 
-- Cadastro e listagem: nome, posição, função, posição anterior, data de cadastro e nota geral. O cadastro inicial não define função nem nota; use a edição para atribuir uma função e as avaliações de partidas para gerar a nota.
-- Exclusão: seleciona por ID, pede confirmação e bloqueia atletas vinculados a times ou avaliações. Não apaga histórico em cascata.
-- Edição de atleta: altera nome, posição e função consultando `positions` e `roles`. Ao mudar de posição, a anterior vai para `last_position_id`.
-- Sorteio: permite informar IDs dos participantes ou selecionar todos. Exige dois goleiros, distribui todos os participantes em dois times com diferença máxima de um atleta e salva `teams` e `team_players` juntos. Cada sorteio cria novos times; times existentes não são sobrescritos.
-- Consulta de times: mostra os IDs e os atletas de cada time.
-- Registro de partida: seleciona dois times diferentes, placar e data no formato `DD/MM/AAAA`. O campo TIMESTAMP existente recebe a data, que é mostrada também no menu. Salva `match_history` e `match_teams` juntos. Bloqueia times vazios e participantes presentes nos dois times.
-- Avaliação: aceita notas finitas de 0 a 10 apenas para participantes da partida e permite avaliar outros jogadores sem selecionar a partida novamente. Uma nova avaliação para o mesmo atleta e partida corrige a nota existente. `users.rating` é recalculado como média das notas por partida; não é preenchido manualmente. As notas são exibidas com uma casa decimal, preservando a precisão armazenada.
-- Histórico: consulta partidas, placares e avaliações.
-- Posições e funções: consulta os dados existentes; o menu não cria nem remove essas referências.
+## Sumário
 
-As gravações usam transações; uma falha desfaz a operação. O programa não cria nem altera tabelas. Times salvos preservam sua composição, sem edição de membros pelo menu.
+- [Visão Geral](#visão-geral)
+- [Estrutura do Projeto](#estrutura-do-projeto)
+- [Funcionalidades e Regras de Negócio](#funcionalidades-e-regras-de-negócio)
+- [Modelo de Dados](#modelo-de-dados)
+- [Tecnologias Utilizadas](#tecnologias-utilizadas)
+- [Pré-requisitos](#pré-requisitos)
+- [Instalação e Configuração](#instalação-e-configuração)
+  - [1. Configurando o Backend](#1-configurando-o-backend)
+  - [2. Configurando as Variáveis de Ambiente](#2-configurando-as-variáveis-de-ambiente)
+  - [3. Verificação do Banco de Dados](#3-verificação-do-banco-de-dados)
+- [Como Executar](#como-executar)
+  - [Menu Interativo (CLI)](#menu-interativo-cli)
+- [Testes Automatizados](#testes-automatizados)
+- [Uso Programático (Exemplos de Código)](#uso-programático-exemplos-de-código)
+- [Próximos Passos (Frontend)](#próximos-passos-frontend)
 
-Para testar o fluxo: cadastre atletas, sorteie dois times (anote os IDs), registre uma partida entre esses times, avalie um participante e consulte a listagem e o histórico. Reinicie o menu para conferir a persistência. Esses passos gravam dados no banco configurado.
+---
 
-## Instalação (PowerShell)
+## Visão Geral
 
-Execute dentro de `backend-core`, com Python 3.10 ou superior:
+O **Fut Manager** foi idealizado para resolver os desafios comuns na gestão de partidas de futebol amador:
+- Sorteio justo de equipes garantindo distribuição equilibrada de goleiros e jogadores de linha.
+- Manutenção do histórico de pontuação e atuações de cada participante.
+- Cálculo estatístico automatizado da nota média de cada atleta com base nas partidas disputadas.
+- Preservação da integridade histórica dos dados (bloqueio de exclusões acidentais que corrompam o histórico).
+
+---
+
+## Estrutura do Projeto
+
+O repositório é organizado no formato monorepo modular:
+
+```text
+fut-manager/
+├── backend/                  # Núcleo da aplicação (Python / SQLAlchemy)
+│   ├── tests/                # Suíte de testes unitários automatizados
+│   │   ├── test_database.py  # Testes de configuração e mapeamento ORM
+│   │   ├── test_futebol.py   # Testes das regras de negócio de partidas/times
+│   │   └── test_menu.py      # Testes do fluxo de interface de linha de comando
+│   ├── .env.example          # Modelo de configuração de variáveis de ambiente
+│   ├── check_db.py           # Utilitário de inspeção e auditoria de schema do banco
+│   ├── db.py                 # Conexão, engine e SessionLocal do SQLAlchemy
+│   ├── futebol.py            # Regras de negócio e operações transacionais
+│   ├── menu.py               # Menu interativo em terminal (CLI)
+│   ├── models.py             # Mapeamento declarativo das 8 tabelas do banco
+│   └── requirements.txt      # Dependências Python do backend
+├── frontend/                 # Interface web / cliente do usuário (em estruturação)
+│   └── .gitkeep
+├── .gitignore
+└── README.md                 # Documentação principal do projeto
+```
+
+---
+
+## Funcionalidades e Regras de Negócio
+
+### 1. Gestão de Atletas
+- **Cadastro**: Registro por nome e posição. Se nenhuma posição for informada (opção `0`), o jogador é cadastrado automaticamente como **Linha** (`current_position_id = 6`).
+- **Edição**: Atualização de nome, posição e função tática (`roles`). Ao alterar a posição de um jogador, a anterior é preservada no histórico (`last_position_id`).
+- **Exclusão Segura**: Um atleta só pode ser excluído se não tiver vínculo com nenhum time ou avaliação de partida registrada, evitando órfãos no banco de dados.
+
+### 2. Sorteio Balanceado de Times
+- **Distribuição de Goleiros**: Exige a presença de pelo menos dois goleiros selecionados, alocando um para cada equipe.
+- **Equilíbrio Numérico**: Distribui aleatoriamente os jogadores restantes de modo que a diferença entre as equipes seja no máximo de 1 atleta.
+- **Persistência Imutável**: Cada sorteio gera novos registros nas tabelas `teams` e `team_players`.
+
+### 3. Registro de Partidas e Placares
+- **Validação de Times**: Impede o registro de partida entre o mesmo time ou com times vazios.
+- **Validação de Integridade**: Bloqueia partidas se o mesmo atleta constar em ambas as equipes.
+- **Dados Registrados**: Data da partida (`match_date`) e gols de cada equipe salvos em transação atômica.
+
+### 4. Avaliações de Desempenho e Rating
+- **Critérios**: Aceita notas de `0.0` a `10.0` exclusivamente para jogadores que participaram da partida selecionada.
+- **Atualização de Avaliação**: Avaliar novamente o mesmo atleta na mesma partida atualiza a nota existente.
+- **Recálculo do Rating**: O atributo `users.rating` é recalculado automaticamente após cada avaliação como a média aritmética das notas obtidas pelo jogador em todas as suas partidas.
+
+### 5. Auditoria de Banco de Dados (`check_db.py`)
+- Script de diagnóstico que inspeciona o banco MySQL configurado em modo somente leitura.
+- Valida tabelas, colunas, tipos de dados, nulabilidade, valores padrão e chaves estrangeiras sem efetuar nenhuma alteração ou gravação.
+
+---
+
+## Modelo de Dados
+
+O banco de dados relacional é composto por 8 tabelas mapeadas via SQLAlchemy:
+
+| Tabela | Descrição |
+|---|---|
+| `positions` | Catálogo de posições dos jogadores (ex: Goleiro, Zagueiro, Linha). |
+| `roles` | Funções táticas / papéis dos membros. |
+| `users` | Dados dos atletas (nome, nota geral, posição atual e anterior, função). |
+| `teams` | Equipes geradas para os jogos. |
+| `team_players` | Associação N:N entre equipes e atletas participantes. |
+| `match_history` | Cabeçalho das partidas disputadas com timestamp. |
+| `match_teams` | Relação dos times envolvidos na partida e quantidade de gols marcados. |
+| `player_match_ratings` | Notas individuais atribuídas aos atletas em cada partida. |
+
+---
+
+## Tecnologias Utilizadas
+
+- **Linguagem**: [Python](https://www.python.org/) (versão 3.10 ou superior)
+- **ORM / Banco de Dados**: [SQLAlchemy 2.0](https://www.sqlalchemy.org/)
+- **Driver MySQL**: [PyMySQL](https://github.com/PyMySQL/PyMySQL) (com suporte a criptografia RSA)
+- **Configuração**: [python-dotenv](https://github.com/theskumar/python-dotenv)
+- **Testes**: Módulo padrão `unittest` com execução em memória via **SQLite**
+
+---
+
+## Pré-requisitos
+
+- **Python 3.10+** instalado no sistema.
+- Servidor **MySQL 8.x** ou **MariaDB** ativo (com a base de dados `fut_manager` criada).
+
+---
+
+## Instalação e Configuração
+
+### 1. Configurando o Backend
+
+Navegue até a pasta `backend`, crie e ative o ambiente virtual:
+
+#### No Windows (PowerShell):
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+#### No Linux / macOS (Bash):
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+### 2. Configurando as Variáveis de Ambiente
+
+No diretório `backend`, crie um arquivo `.env` a partir do modelo `.env.example`:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
+*(ou `cp .env.example .env` no Linux/macOS)*
 
-Preencha `DB_USER` e `DB_PASSWORD` no `.env` com suas credenciais locais. Os padrões são `DB_HOST=localhost`, `DB_PORT=3306` e `DB_NAME=fut_manager`. Variáveis do ambiente prevalecem sobre o arquivo. Senha vazia é aceita se configurada explicitamente; coloque senhas com `#`, espaços ou outros caracteres especiais entre aspas no `.env`.
+Abra o arquivo `.env` e preencha com as credenciais do seu banco MySQL:
 
-O `.env` é ignorado pelo Git. A URL usa `URL.create`, sem concatenar ou escapar manualmente a senha. Não registre a URL completa. Importar `db` ou `models` não abre conexão; as credenciais são necessárias ao acessar o banco. O engine usa `utf8mb4`, `pool_pre_ping` e logs SQL desativados.
-
-## Conferir conexão e estrutura
-
-```powershell
-.\.venv\Scripts\python.exe check_db.py
+```ini
+DB_HOST=localhost
+DB_PORT=3306
+DB_NAME=fut_manager
+DB_USER=seu_usuario
+DB_PASSWORD=sua_senha
 ```
 
-O comando executa `SELECT 1`, confirma `SELECT DATABASE()` e inspeciona as oito tabelas: colunas, tipos, nulabilidade, padrões, autoincremento, chaves primárias e estrangeiras. Tabelas extras são permitidas; colunas extras nas tabelas mapeadas são relatadas. Retorna código `0` no sucesso ou `1` para falhas e divergências, sem mostrar a senha.
+> **Dica**: Se a senha contiver caracteres especiais (`#`, `@`, espaços), envolva-a entre aspas (ex: `DB_PASSWORD="p@ss#word"`).
 
-Não executa `create_all`, migrações nem gravações. Se as tabelas estiverem em `meu_projeto` devido ao segundo `USE` do script original, a verificação relatará tabelas ausentes em `fut_manager`; nenhuma correção é automática.
+---
 
-## Consulta e transação
+### 3. Verificação do Banco de Dados
 
-Exemplos para executar a partir de `backend-core`:
+Antes de iniciar a aplicação, você pode validar se a conexão e o schema das tabelas estão corretos executando o script de auditoria:
+
+```powershell
+python check_db.py
+```
+
+- Retorna código `0` caso o schema esteja em conformidade.
+- Aponta eventuais colunas ausentes, divergências de tipo ou chaves estrangeiras pendentes.
+
+---
+
+## Como Executar
+
+### Menu Interativo (CLI)
+
+Com o ambiente virtual ativado e dentro do diretório `backend`, execute:
+
+```powershell
+python menu.py
+```
+
+Opções disponíveis no menu:
+1. **Cadastrar atleta**: Inclusão de novos jogadores.
+2. **Listar atletas**: Exibe atletas cadastrados, posição, função, nota média e data de cadastro.
+3. **Excluir atleta**: Exclusão com confirmação e validação de dependências.
+4. **Sortear e salvar times**: Sorteio balanceado com seleção de participantes e obrigatoriedade de goleiros.
+5. **Editar atleta**: Atualização de nome, função e mudança de posição.
+6. **Listar times**: Visualização das equipes criadas e seus membros.
+7. **Registrar partida e placar**: Registro de confronto entre duas equipes, gols e data.
+8. **Listar partidas e avaliações**: Consulta do histórico de jogos, placares e notas atribuídas.
+9. **Avaliar atleta em partida**: Atribuição de nota (0 a 10) a atletas que jogaram determinada partida.
+10. **Consultar posições e funções**: Listagem das referências cadastradas no sistema.
+11. **Sair**: Encerra a aplicação.
+
+---
+
+## Testes Automatizados
+
+A suíte de testes unitários cobre regras de negócio, sorteio de equipes, avaliações, transações e validações de banco de dados. Os testes utilizam um banco SQLite em memória, dispensando a necessidade de uma instância MySQL ativa.
+
+Para executar os testes:
+
+```powershell
+# A partir do diretório raiz do projeto:
+python -m unittest discover -s backend/tests -v
+```
+
+Ou a partir do diretório `backend`:
+```powershell
+cd backend
+python -m unittest discover -s tests -v
+```
+
+---
+
+## Uso Programático (Exemplos de Código)
+
+Você também pode utilizar os modelos e sessões do SQLAlchemy diretamente em scripts Python:
 
 ```python
 from sqlalchemy import select
 from db import SessionLocal
 from models import User
 
+# Consulta de atletas
 with SessionLocal() as session:
     users = session.scalars(select(User).order_by(User.id)).all()
     for user in users:
-        print(user.username, user.current_position, user.last_position)
-```
+        posicao = user.current_position.position_title if user.current_position else "Sem posição"
+        print(f"{user.username} - Posição: {posicao} - Nota: {user.rating}")
 
-O exemplo seguinte **insere um usuário** quando executado:
-
-```python
-from db import SessionLocal
-from models import User
-
+# Inserção com controle transacional automático
 with SessionLocal.begin() as session:
-    session.add(User(username="Gabriel"))
+    novo_atleta = User(username="Gabriel", current_position_id=6)
+    session.add(novo_atleta)
 ```
 
-`SessionLocal.begin()` confirma no sucesso, desfaz em caso de exceção e fecha a sessão automaticamente. Os relacionamentos não possuem exclusão em cascata. `created_at` e `goals` usam os padrões do servidor; `DOUBLE` e campos opcionais seguem o SQL fornecido.
+---
 
-## Testes sem MySQL
+## Próximos Passos (Frontend)
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
+O diretório `frontend/` está reservado para a implementação da interface gráfica (Web/Mobile), que consumirá as regras de negócio e dados do `backend`.
