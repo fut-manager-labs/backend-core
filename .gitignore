@@ -13,6 +13,9 @@ __pycache__/
 env/
 venv/
 
+# Cópia local do antigo repositório; o código oficial está em backend/.
+/backend-core/
+
 # IDEs e editores
 .idea/
 .vscode/

@@ -37,11 +37,13 @@ class MenuTests(unittest.TestCase):
         return output.getvalue()
 
     def test_cadastro_persiste_e_listagem_em_nova_sessao(self):
-        self.cadastrar(['S', 'Ana', 'invalida', '6', 'N'])
+        self.cadastrar(['S', 'Ana', 'invalida', '6', 'abc', '-1', '11', 'nan', 'inf', '8,5', 'N'])
         with self.sessions() as session:
             atleta = session.scalar(select(User))
             self.assertEqual(atleta.username, 'ANA')
             self.assertEqual(atleta.current_position_id, 6)
+            self.assertEqual(atleta.initial_rating, 8.5)
+            self.assertEqual(atleta.rating, 8.5)
         output = io.StringIO()
         with redirect_stdout(output):
             menu.listar()
@@ -50,7 +52,7 @@ class MenuTests(unittest.TestCase):
     def test_sem_posicao_e_usuario_preexistente(self):
         with self.sessions.begin() as session:
             session.add(User(username='Gabriel'))
-        self.cadastrar(['S', 'Bia', '0', 'N'])
+        self.cadastrar(['S', 'Bia', '0', '0', 'N'])
         atletas = menu.consultar_atletas()
         self.assertEqual([a['Nome'] for a in atletas], ['Gabriel', 'BIA'])
         self.assertEqual(atletas[0]['Posicao'], 'Sem posição selecionada')
@@ -74,13 +76,67 @@ class MenuTests(unittest.TestCase):
             return original_flush(session, *args, **kwargs)
 
         with patch.object(Session, 'flush', falhar_gravacao):
-            output = self.cadastrar(['S', 'Teste', '1'])
+            output = self.cadastrar(['S', 'Teste', '1', '7'])
         self.assertIn('Nenhum cadastro foi confirmado', output)
         self.assertNotIn('senha-secreta', output)
         self.assertEqual(menu.consultar_atletas(), [])
 
 
 class MenuFluxoTests(unittest.TestCase):
+    def test_pesquisa_mostra_somente_atleta_do_id_informado(self):
+        atleta = dict(id=7, nome='Ana', posicao='Linha', anterior='Goleiro',
+                      funcao='Jogador', nota=8.543, nota_inicial=9, criado_em=None)
+        output = io.StringIO()
+        with patch.object(futebol, 'consultar_atleta', return_value=atleta) as consultar, \
+             patch('builtins.input', side_effect=['abc', '-1', '7']), redirect_stdout(output):
+            menu.pesquisar_atleta()
+        consultar.assert_called_once_with(7)
+        self.assertIn('ID: 7 | Nome: Ana | Posição: Linha', output.getvalue())
+        self.assertIn('Posição anterior: Goleiro | Nota: 8.5', output.getvalue())
+        self.assertIn('Habilidade inicial: 9.0', output.getvalue())
+
+    def test_pesquisa_cancelada_nao_consulta(self):
+        with patch.object(futebol, 'consultar_atleta') as consultar, \
+             patch('builtins.input', return_value='0'), redirect_stdout(io.StringIO()):
+            menu.pesquisar_atleta()
+        consultar.assert_not_called()
+
+    def test_pesquisa_inexistente_informa_sem_encerrar_menu(self):
+        output = io.StringIO()
+        with patch.object(futebol, 'consultar_atleta', side_effect=futebol.NaoEncontrado('Atleta não encontrado: 999.')), \
+             patch('builtins.input', side_effect=['11', '999', '14', 'S']), redirect_stdout(output):
+            menu.menu()
+        self.assertIn('Atleta não encontrado: 999.', output.getvalue())
+        self.assertIn('Obrigado, volte sempre!', output.getvalue())
+
+    def test_exclusao_multipla_deduplica_e_continua_apos_bloqueio(self):
+        atletas = [dict(Id=1, Nome='Ana'), dict(Id=2, Nome='Bia'), dict(Id=3, Nome='Caio')]
+        output = io.StringIO()
+        with patch.object(menu, 'listar'), \
+             patch.object(menu, 'consultar_atletas', return_value=atletas), \
+             patch.object(futebol, 'excluir_atleta', side_effect=[None, ValueError('Atleta vinculado'), None]) as excluir, \
+             patch('builtins.input', side_effect=['1, 2, 1, 99, 3', 'S']), redirect_stdout(output):
+            menu.deletar()
+        self.assertEqual(excluir.call_args_list, [call(1), call(2), call(3)])
+        self.assertIn('ID 99: não encontrado', output.getvalue())
+        self.assertIn('ID 2 não excluído: Atleta vinculado', output.getvalue())
+        self.assertIn('Atleta excluído: ID 3', output.getvalue())
+
+    def test_exclusao_rejeita_entrada_invalida_e_permite_cancelar(self):
+        with patch.object(menu, 'listar'), patch.object(futebol, 'excluir_atleta') as excluir, \
+             patch('builtins.input', side_effect=['1, abc', '0, 2', '-1', '', '0']), \
+             redirect_stdout(io.StringIO()):
+            menu.deletar()
+        excluir.assert_not_called()
+
+    def test_exclusao_nao_confirmada_preserva_atletas(self):
+        with patch.object(menu, 'listar'), \
+             patch.object(menu, 'consultar_atletas', return_value=[dict(Id=1, Nome='Ana')]), \
+             patch.object(futebol, 'excluir_atleta') as excluir, \
+             patch('builtins.input', side_effect=['1', 'N']), redirect_stdout(io.StringIO()):
+            menu.deletar()
+        excluir.assert_not_called()
+
     def test_registro_aceita_somente_data(self):
         with patch.object(menu, 'listar_times'), \
              patch.object(futebol, 'registrar_partida', return_value=3) as salvar, \
@@ -103,10 +159,24 @@ class MenuFluxoTests(unittest.TestCase):
     def test_sair_e_ultima_opcao_e_editar_ocupa_cinco(self):
         output = io.StringIO()
         with patch.object(menu, 'editar') as editar, \
-             patch('builtins.input', side_effect=['5', '11', 'S']), redirect_stdout(output):
+             patch('builtins.input', side_effect=['5', '14', 'S']), redirect_stdout(output):
             menu.menu()
         editar.assert_called_once()
-        self.assertIn('10. Consultar posições e funções\n11. Sair', output.getvalue())
+        self.assertIn('12. Excluir time\n13. Excluir partida\n14. Sair', output.getvalue())
+
+    def test_exclusoes_time_partida_exigem_confirmacao(self):
+        for funcao, listagem, consulta, excluir, retorno in (
+                (menu.deletar_time, 'listar_times', 'consultar_times', 'excluir_time', [dict(id=1, nome='Azul')]),
+                (menu.deletar_partida, 'listar_partidas', 'consultar_partidas', 'excluir_partida', [dict(id=1, data=None)])):
+            for resposta in ('S', 'N'):
+                with patch.object(menu, listagem), patch.object(futebol, consulta, return_value=retorno), \
+                     patch.object(futebol, excluir) as operacao, \
+                     patch('builtins.input', side_effect=['1', resposta]), redirect_stdout(io.StringIO()):
+                    funcao()
+                if resposta == 'S':
+                    operacao.assert_called_once_with(1)
+                else:
+                    operacao.assert_not_called()
 
     def test_historico_exibe_data_e_uma_casa_decimal(self):
         partidas = [dict(id=1, data=datetime(2026, 10, 12, 20, 30),
